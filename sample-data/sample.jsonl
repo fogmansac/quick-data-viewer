@@ -1,0 +1,7 @@
+{"timestamp": "2025-02-22T10:15:30", "user": "alice", "action": "login", "status": "success"}
+{"timestamp": "2025-02-22T10:18:45", "user": "bob", "action": "view_page", "status": "success"}
+{"timestamp": "2025-02-22T10:22:10", "user": "alice", "action": "upload_file", "status": "success"}
+{"timestamp": "2025-02-22T10:25:33", "user": "charlie", "action": "login", "status": "failed"}
+{"timestamp": "2025-02-22T10:28:17", "user": "bob", "action": "download_file", "status": "success"}
+{"timestamp": "2025-02-22T10:31:42", "user": "charlie", "action": "login", "status": "success"}
+{"timestamp": "2025-02-22T10:35:08", "user": "alice", "action": "logout", "status": "success"}
