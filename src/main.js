@@ -36,24 +36,22 @@ selectFileBtn.addEventListener('click', async () => {
     }
 });
 
-// Drag and drop
-dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
+// Drag and drop via Tauri's native drag-drop events
+const { listen } = window.__TAURI__.event;
+
+listen('tauri://drag-over', () => {
     dropZone.classList.add('dragover');
 });
 
-dropZone.addEventListener('dragleave', () => {
+listen('tauri://drag-leave', () => {
     dropZone.classList.remove('dragover');
 });
 
-dropZone.addEventListener('drop', async (e) => {
-    e.preventDefault();
+listen('tauri://drag-drop', async (event) => {
     dropZone.classList.remove('dragover');
-    
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length > 0) {
-        const file = files[0];
-        await loadFile(file.path);
+    const paths = event.payload.paths;
+    if (paths && paths.length > 0) {
+        await loadFile(paths[0]);
     }
 });
 

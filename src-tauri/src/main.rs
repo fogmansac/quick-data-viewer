@@ -57,58 +57,150 @@ fn parse_csv(file_path: String) -> Result<FileData, String> {
     })
 }
 
-/// Parse JSON file (array of objects) and return structured data
+/// Flatten a JSON object into dot-notation keys and string values.
+/// e.g. {"user": {"name": "Alice", "age": 28}} -> [("user.name", "Alice"), ("user.age", "28")]
+fn flatten_object(prefix: &str, value: &serde_json::Value, out: &mut Vec<(String, String)>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{}.{}", prefix, k)
+                };
+                flatten_object(&key, v, out);
+            }
+        }
+        serde_json::Value::String(s) => out.push((prefix.to_string(), s.clone())),
+        serde_json::Value::Number(n) => out.push((prefix.to_string(), n.to_string())),
+        serde_json::Value::Bool(b) => out.push((prefix.to_string(), b.to_string())),
+        serde_json::Value::Null => out.push((prefix.to_string(), String::new())),
+        serde_json::Value::Array(arr) => {
+            // Short arrays of primitives get joined, otherwise show as JSON
+            let all_primitive = arr.iter().all(|v| !v.is_object() && !v.is_array());
+            if all_primitive && arr.len() <= 10 {
+                let items: Vec<String> = arr.iter().map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                }).collect();
+                out.push((prefix.to_string(), items.join(", ")));
+            } else {
+                out.push((prefix.to_string(), value.to_string()));
+            }
+        }
+    }
+}
+
+/// Extract the data array from a JSON value:
+/// - Already an array of objects -> use directly
+/// - A dict of objects (each key maps to an object) -> each key becomes a row with a "Name" column
+/// - An object with a key whose value is the largest array of objects -> use that array
+/// - A single object -> wrap in a one-element array
+fn extract_data_array(parsed: serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+    match parsed {
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                return Err("JSON array is empty".to_string());
+            }
+            Ok(arr)
+        }
+        serde_json::Value::Object(map) => {
+            // Check for dictionary-of-objects pattern: {"key1": {...}, "key2": {...}}
+            let obj_value_count = map.values().filter(|v| v.is_object()).count();
+            if obj_value_count > 1 && obj_value_count * 2 >= map.len() {
+                let mut rows = Vec::new();
+                for (key, value) in &map {
+                    if let serde_json::Value::Object(inner) = value {
+                        let mut row = serde_json::Map::new();
+                        row.insert("Name".to_string(), serde_json::Value::String(key.clone()));
+                        for (k, v) in inner {
+                            row.insert(k.clone(), v.clone());
+                        }
+                        rows.push(serde_json::Value::Object(row));
+                    }
+                }
+                return Ok(rows);
+            }
+
+            // Find the key with the largest array-of-objects value
+            let best_key = map.iter()
+                .filter_map(|(k, v)| {
+                    if let serde_json::Value::Array(arr) = v {
+                        if !arr.is_empty() && arr[0].is_object() {
+                            return Some((k.clone(), arr.len()));
+                        }
+                    }
+                    None
+                })
+                .max_by_key(|(_, len)| *len)
+                .map(|(k, _)| k);
+
+            if let Some(key) = best_key {
+                if let Some(serde_json::Value::Array(arr)) = map.get(&key) {
+                    return Ok(arr.clone());
+                }
+            }
+
+            // No nested array found — treat the object itself as a single row
+            Ok(vec![serde_json::Value::Object(map)])
+        }
+        _ => Err("JSON must be an object or an array of objects".to_string()),
+    }
+}
+
+/// Parse JSON file and return structured data
 #[tauri::command]
 fn parse_json(file_path: String) -> Result<FileData, String> {
     let content = fs::read_to_string(&file_path)
         .map_err(|e| format!("Failed to read file: {}", e))?;
-    
-    let data: Vec<serde_json::Value> = serde_json::from_str(&content)
+
+    let parsed: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse JSON: {}", e))?;
-    
-    if data.is_empty() {
-        return Err("JSON file is empty".to_string());
-    }
-    
-    // Extract headers from first object's keys
-    let headers: Vec<String> = if let Some(first_obj) = data.first() {
-        if let Some(obj) = first_obj.as_object() {
-            obj.keys().map(|k| k.to_string()).collect()
-        } else {
-            return Err("JSON must be an array of objects".to_string());
-        }
-    } else {
-        return Err("JSON file is empty".to_string());
-    };
-    
-    // Convert objects to rows
-    let mut rows = Vec::new();
+
+    let data = extract_data_array(parsed)?;
+
+    // Flatten all rows and collect every header we see (preserving order of first appearance)
+    let mut all_flat: Vec<Vec<(String, String)>> = Vec::new();
+    let mut headers: Vec<String> = Vec::new();
+    let mut header_set = std::collections::HashSet::new();
+
     for item in &data {
-        if let Some(obj) = item.as_object() {
-            let row: Vec<String> = headers.iter()
-                .map(|h| {
-                    obj.get(h)
-                        .and_then(|v| match v {
-                            serde_json::Value::String(s) => Some(s.clone()),
-                            serde_json::Value::Number(n) => Some(n.to_string()),
-                            serde_json::Value::Bool(b) => Some(b.to_string()),
-                            serde_json::Value::Null => Some("".to_string()),
-                            _ => Some(v.to_string()),
-                        })
-                        .unwrap_or_else(|| "".to_string())
-                })
-                .collect();
-            rows.push(row);
+        let mut pairs = Vec::new();
+        flatten_object("", item, &mut pairs);
+        for (key, _) in &pairs {
+            if header_set.insert(key.clone()) {
+                headers.push(key.clone());
+            }
+        }
+        all_flat.push(pairs);
+    }
+
+    // Ensure "Name" column (from dict-of-objects) appears first
+    if let Some(pos) = headers.iter().position(|h| h == "Name") {
+        if pos > 0 {
+            let name = headers.remove(pos);
+            headers.insert(0, name);
         }
     }
-    
+
+    // Build rows aligned to the unified header list
+    let mut rows = Vec::new();
+    for flat in &all_flat {
+        let map: std::collections::HashMap<&str, &str> =
+            flat.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let row: Vec<String> = headers.iter()
+            .map(|h| map.get(h.as_str()).unwrap_or(&"").to_string())
+            .collect();
+        rows.push(row);
+    }
+
     let row_count = rows.len();
     let file_name = std::path::Path::new(&file_path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
-    
+
     Ok(FileData {
         headers,
         rows,
